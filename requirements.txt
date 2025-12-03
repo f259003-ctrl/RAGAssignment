@@ -1,6 +1,9 @@
-streamlit
-faiss-cpu
-sentence-transformers
+langchain
+langchain-google-genai
+langchain-community
+chromadb
 pandas
 google-generativeai
 python-dotenv
+streamlit
+tqdm

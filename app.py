@@ -1,4 +1,3 @@
-!pip install fiass-cpu
 import streamlit as st
 import faiss
 import pickle

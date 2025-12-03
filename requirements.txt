@@ -1,9 +1,5 @@
-langchain
-langchain-google-genai
-langchain-community
-chromadb
-pandas
-google-generativeai
-python-dotenv
 streamlit
-tqdm
+faiss-cpu
+sentence-transformers==2.2.2
+transformers==4.34.0
+google-generativeai

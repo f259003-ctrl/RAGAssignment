@@ -1,106 +1,81 @@
+# streamlit_app.py
 import streamlit as st
-import faiss
-import pickle
+import pandas as pd
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.vectorstores import Chroma
+from langchain.embeddings import GoogleGenerativeAIEmbeddings
+import chromadb
 import os
-from sentence_transformers import SentenceTransformer
-import google.generativeai as genai
 
-if "GOOGLE_API_KEY" not in st.secrets:
-    st.error("Missing GOOGLE_API_KEY in Streamlit Secrets!")
-    st.stop()
+st.set_page_config(page_title="Medical RAG Assistant", layout="wide")
 
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+# ---- Load Secrets ----
+GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+CHROMA_API_KEY = st.secrets["CHROMA_API_KEY"]
+CHROMA_TENANT = st.secrets["CHROMA_TENANT"]
+CHROMA_DB = st.secrets["CHROMA_DB"]
 
-# ------------------------------------------------------------
-# Page Configuration
-# ------------------------------------------------------------
-st.set_page_config(
-    page_title="Medical RAG Assistant",
-    page_icon="🩺",
-    layout="wide"
+os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+
+# ---- Connect to Chroma Cloud ----
+chroma_client = chromadb.CloudClient(
+    api_key=CHROMA_API_KEY,
+    tenant=CHROMA_TENANT,
+    database=CHROMA_DB
 )
 
-st.title("🩺 Medical RAG Assistant")
-st.caption("Retrieval-Augmented Generation using FAISS + Gemini")
+collection = chroma_client.get_or_create_collection(
+    name="medical_rag_faiss",
+    metadata={"hnsw:space": "cosine"}
+)
 
-# ------------------------------------------------------------
-# Load Vector Store (FAISS)
-# ------------------------------------------------------------
-@st.cache_resource
-def load_rag_components():
-    index = faiss.read_index("faiss_index.idx")
-    with open("faiss_metadata.pkl", "rb") as f:
-        meta = pickle.load(f)
+# ---- Embeddings ----
+embed_model = GoogleGenerativeAIEmbeddings(
+    model="text-embedding-004"
+)
 
-    docs = meta["docs"]
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+# ---- LLM ----
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    temperature=0.2
+)
 
-    return index, docs, model
+# ---- RAG Retrieval ----
+def retrieve_answer(query):
+    query_emb = embed_model.embed_query(query)
+    results = collection.query(query_embeddings=[query_emb], n_results=3)
 
-index, docs, embed_model = load_rag_components()
-
-# ------------------------------------------------------------
-# Retrieve Top-K Chunks
-# ------------------------------------------------------------
-def retrieve_context(query, k=5):
-    q_emb = embed_model.encode([query], convert_to_numpy=True).astype("float32")
-    faiss.normalize_L2(q_emb)
-    D, I = index.search(q_emb, k)
-    hits = [docs[int(i)] for i in I[0]]
-    return hits
-
-# ------------------------------------------------------------
-# Generate Answer with Gemini
-# ------------------------------------------------------------
-def generate_answer(question, contexts):
-    context_text = "\n\n---\n".join(contexts)
+    context = ""
+    for i, doc in enumerate(results["documents"][0]):
+        context += f"\n[Chunk {i+1}]\n{doc}\n"
 
     prompt = f"""
-You are a medically-safe clinical assistant.
-Use ONLY the information inside the provided context chunks.
-If the answer is not found, reply:
-"I cannot confirm this from the available information."
+You are a medical assistant. Use ONLY the evidence in the retrieved context.
+If information is missing, clearly say so.
 
 Context:
-{context_text}
+{context}
 
-Question:
-{question}
-
-Provide a concise, factual answer with citations to chunk numbers.
+Question: {query}
 """
 
-    try:
-        response = genai.GenerativeModel("gemini-1.5-pro").generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"⚠ Error: {e}"
+    response = llm.invoke(prompt)
+    return response.content
 
-# ------------------------------------------------------------
-# UI Input
-# ------------------------------------------------------------
-user_query = st.text_input("Enter your medical question:")
 
-if st.button("Get Answer"):
+# ---- STREAMLIT UI ----
+st.title("🩺 Medical RAG Assistant (ChromaDB + Gemini)")
 
-    if not user_query.strip():
+user_query = st.text_input("Ask a medical question:")
+
+if st.button("Search"):
+    if user_query.strip() == "":
         st.warning("Please enter a question.")
-        st.stop()
-
-    # Retrieve
-    hits = retrieve_context(user_query, k=5)
-
-    st.subheader("🔎 Retrieved Chunks")
-    for i, h in enumerate(hits):
-        st.markdown(f"**Chunk {i+1} — (Row {h['metadata']['row']}, Chunk {h['metadata']['chunk']})**")
-        st.write(h["text"])
-
-    # Generate final answer
-    st.subheader("🧠 Medical Assistant Answer")
-    contexts = [h["text"] for h in hits]
-    answer = generate_answer(user_query, contexts)
-    st.write(answer)
-
-    st.markdown("---")
-    st.caption("⚕ This tool provides information for educational purposes and is not a substitute for professional medical advice.")
-
+    else:
+        with st.spinner("Retrieving answer..."):
+            try:
+                answer = retrieve_answer(user_query)
+                st.success("Answer:")
+                st.write(answer)
+            except Exception as e:
+                st.error(f"Error: {e}")
